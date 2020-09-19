@@ -10,6 +10,7 @@ import resource
 import traceback
 import numpy as np
 import pandas as pd
+from Bio import bgzf
 from tqdm import tqdm
 import concurrent.futures
 from subprocess import call
@@ -27,18 +28,21 @@ def prepare_bam_fie(args):
     Make this a .bam file
     '''
     bam = args.bam
+    processes = args.processes
 
     if bam[-4:] == '.sam':
         logging.info("You gave me a sam- I'm going to make it a .bam now")
 
         bam = _sam_to_bam(bam)
-        bam = _sort_index_bam(bam)
+        bam = _sort_index_bam(bam, processes)
 
     elif bam[-4:] == '.bam':
         if (os.path.exists(bam + '.bai')) | ((os.path.exists(bam[:-4] + '.bai'))):
             pass
+        elif _is_sorted_bam(bam):
+            bam = _sort_index_bam(bam, processes, sort=False, rm_ori=False)
         else:
-            bam = _sort_index_bam(bam, rm_ori=False)
+            bam = _sort_index_bam(bam, processes, sort=True, rm_ori=False)
 
     if os.stat(bam).st_size == 0:
         logging.error("Failed to generated a sorted .bam file! Make sure you have "+\
@@ -493,6 +497,7 @@ def _update_snp_table_T(Stable, clonT, clonTR, MMcounts, p2c,\
     ret_counts = np.zeros(4, dtype=int)
     for mm in sorted(list(MMcounts.keys())):
         counts = _mm_counts_to_counts(MMcounts, mm)
+        ret_counts = counts
         snp, morphia = call_snv_site(counts, refBase, min_cov=min_cov, min_freq=min_freq) # Call SNP
 
         # Update clonality
@@ -531,7 +536,6 @@ def _update_snp_table_T(Stable, clonT, clonTR, MMcounts, p2c,\
                anySNP = True
                bases.add(snp)
                bases.add(varbase)
-               ret_counts = counts
 
            elif (morphia == 1) & (anySNP == True):
                p2c[pos] = True
@@ -1124,7 +1128,7 @@ def _sam_to_bam(sam):
 
     return bam
 
-def _sort_index_bam(bam, rm_ori=False):
+def _sort_index_bam(bam, processes, sort=True, rm_ori=False):
     '''
     From a .bam file, sort and index it. Remove original if rm_ori
     Return path of sorted and indexed bam
@@ -1133,19 +1137,35 @@ def _sort_index_bam(bam, rm_ori=False):
         logging.error('Bam file needs to end in .bam')
         sys.exit()
 
-    logging.info("sorting {0}".format(bam))
-    sorted_bam = bam[:-4] + '.sorted.bam'
-    cmd = ['samtools', 'sort', bam, '-o', sorted_bam]
-    print(' '.join(cmd))
-    call(cmd)
+    if sort:
+        logging.info("sorting {0}".format(bam))
+        sorted_bam = bam[:-4] + '.sorted.bam'
+        cmd = ['samtools', 'sort', bam, '-o', sorted_bam, '-@', str(processes)]
+        print(' '.join(cmd))
+        call(cmd)
 
-    logging.info("Indexing {0}".format(sorted_bam))
-    cmd = ['samtools', 'index', sorted_bam, sorted_bam + '.bai']
-    print(' '.join(cmd))
-    call(cmd)
+        logging.info("Indexing {0}".format(sorted_bam))
+        cmd = ['samtools', 'index', sorted_bam, sorted_bam + '.bai', '-@', str(processes)]
+        print(' '.join(cmd))
+        call(cmd)
 
-    if rm_ori:
-        logging.info("Deleting {0}".format(bam))
-        os.remove(bam)
+        if rm_ori:
+            logging.info("Deleting {0}".format(bam))
+            os.remove(bam)
+
+    else:
+        sorted_bam = bam
+        logging.info("Indexing {0}".format(sorted_bam))
+        cmd = ['samtools', 'index', sorted_bam, sorted_bam + '.bai', '-@', str(processes)]
+        print(' '.join(cmd))
+        call(cmd)
 
     return sorted_bam
+
+def _is_sorted_bam(bam):
+    """
+    Checks if a BAM file is sorted by coordinate.
+    """
+    with bgzf.BgzfReader(bam, "rb") as fin:
+        bam_header = fin.readline().strip()
+        return b"SO:coordinate" in bam_header
